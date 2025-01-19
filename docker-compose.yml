@@ -1,3 +1,4 @@
+
 version: '3.8'
 
 services:
@@ -10,12 +11,15 @@ services:
       - SELENIUM_HOST=selenium
       - SELENIUM_PORT=4444
     depends_on:
-      - selenium
+      selenium:
+        condition: service_healthy
     networks:
       - review-scraper-network
+    restart: on-failure
 
   selenium:
     image: selenium/standalone-chrome:latest
+    platform: linux/amd64
     ports:
       - "4444:4444"
       - "7900:7900"  # VNC server (for debugging)
@@ -28,6 +32,13 @@ services:
       - /dev/shm:/dev/shm
     networks:
       - review-scraper-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:4444/wd/hub/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    shm_size: '2gb'
 
 networks:
   review-scraper-network:

@@ -1,5 +1,5 @@
 # Dockerfile
-FROM golang:1.21-alpine
+FROM golang:1.23-alpine
 
 # Install Chrome and ChromeDriver dependencies
 RUN apk add --no-cache \

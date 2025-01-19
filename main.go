@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/joho/godotenv"
 	"github.com/tebeka/selenium"
 	"github.com/tmc/langchaingo/llms"
@@ -50,18 +50,21 @@ type ReviewScraper struct {
 
 // SeleniumConfig holds the configuration for Selenium connection
 type SeleniumConfig struct {
-	Host string
-	Port string
+	Host          string
+	Port          string
+	MaxRetries    int
+	RetryInterval time.Duration
 }
 
 // GetSeleniumConfig retrieves Selenium configuration from environment
 func GetSeleniumConfig() SeleniumConfig {
 	return SeleniumConfig{
-		Host: getEnvOrDefault("SELENIUM_HOST", "localhost"),
-		Port: getEnvOrDefault("SELENIUM_PORT", "4444"),
+		Host:          getEnvOrDefault("SELENIUM_HOST", "localhost"),
+		Port:          getEnvOrDefault("SELENIUM_PORT", "4444"),
+		MaxRetries:    30, // Will try for 5 minutes
+		RetryInterval: 10 * time.Second,
 	}
 }
-
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -69,7 +72,28 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// Update the NewReviewScraper function
+// waitForSelenium waits for Selenium to be ready
+func waitForSelenium(config SeleniumConfig) error {
+	seleniumURL := fmt.Sprintf("http://%s:%s/wd/hub/status", config.Host, config.Port)
+
+	for i := 0; i < config.MaxRetries; i++ {
+		resp, err := http.Get(seleniumURL)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		log.Printf("Waiting for Selenium to be ready (attempt %d/%d)...", i+1, config.MaxRetries)
+		time.Sleep(config.RetryInterval)
+	}
+
+	return fmt.Errorf("selenium did not become ready within the timeout period")
+}
+
+// NewReviewScraper creates a new instance of ReviewScraper with retry logic
 func NewReviewScraper() (*ReviewScraper, error) {
 	// Load API key
 	err := godotenv.Load()
@@ -94,6 +118,11 @@ func NewReviewScraper() (*ReviewScraper, error) {
 	// Get Selenium configuration
 	seleniumConfig := GetSeleniumConfig()
 
+	// Wait for Selenium to be ready
+	if err := waitForSelenium(seleniumConfig); err != nil {
+		return nil, fmt.Errorf("selenium readiness check failed: %v", err)
+	}
+
 	// Configure Chrome options
 	caps := selenium.Capabilities{
 		"browserName": "chrome",
@@ -107,16 +136,29 @@ func NewReviewScraper() (*ReviewScraper, error) {
 		},
 	}
 
-	// Connect to Selenium
-	driver, err := selenium.NewRemote(
-		caps,
-		fmt.Sprintf("http://%s:%s/wd/hub",
-			seleniumConfig.Host,
-			seleniumConfig.Port,
-		),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Selenium WebDriver: %v", err)
+	// Connect to Selenium with retries
+	var driver selenium.WebDriver
+	var lastErr error
+
+	for i := 0; i < seleniumConfig.MaxRetries; i++ {
+		driver, err = selenium.NewRemote(
+			caps,
+			fmt.Sprintf("http://%s:%s/wd/hub",
+				seleniumConfig.Host,
+				seleniumConfig.Port,
+			),
+		)
+		if err == nil {
+			break
+		}
+		lastErr = err
+		log.Printf("Failed to connect to Selenium (attempt %d/%d): %v", i+1, seleniumConfig.MaxRetries, err)
+		time.Sleep(seleniumConfig.RetryInterval)
+	}
+
+	if driver == nil {
+		return nil, fmt.Errorf("failed to connect to Selenium after %d attempts: %v",
+			seleniumConfig.MaxRetries, lastErr)
 	}
 
 	return &ReviewScraper{
@@ -382,12 +424,12 @@ func main() {
 	})
 
 	// Add middleware
-	app.Use(logger.New())
+	//app.Use(logger.New())
 	app.Use(cors.New())
 
 	// Setup routes
 	setupRoutes(app, scraper)
 
 	// Start server
-	log.Fatal(app.Listen(":3001"))
+	log.Fatal(app.Listen(":3000"))
 }
